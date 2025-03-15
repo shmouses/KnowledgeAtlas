@@ -86,30 +86,85 @@ class GraphPersistence:
             # Create new graph
             graph = nx.MultiDiGraph()
             
+            # Validate the JSON structure
+            if not isinstance(graph_dict, dict) or 'nodes' not in graph_dict:
+                print("Invalid JSON format: missing 'nodes' array")
+                return None
+            
+            # Get valid node types
+            valid_types = {t.value: t for t in NodeType}
+            print(f"Valid node types: {list(valid_types.keys())}")
+            
             # Add nodes with their attributes
             for node_data in graph_dict['nodes']:
-                metadata = NodeMetadata(
-                    url=node_data.get('url'),
-                    description=node_data.get('description')
-                )
-                
-                graph.add_node(
-                    node_data['id'],
-                    type=NodeType(node_data['type']) if node_data.get('type') else None,
-                    level=node_data.get('level', 0),
-                    metadata=metadata
-                )
+                try:
+                    # Validate required node fields
+                    if 'id' not in node_data:
+                        print(f"Invalid node data: missing 'id' field - {node_data}")
+                        continue
+                    
+                    # Get and validate node type
+                    node_type_str = node_data.get('type', '').lower() if node_data.get('type') else None
+                    if not node_type_str:
+                        print(f"Warning: Node '{node_data['id']}' has no type specified, using 'other'")
+                        node_type_str = 'other'
+                    
+                    if node_type_str not in valid_types:
+                        print(f"Invalid node type '{node_type_str}' for node '{node_data['id']}'. Valid types are: {list(valid_types.keys())}")
+                        continue
+                    
+                    # Create metadata
+                    metadata = NodeMetadata(
+                        url=node_data.get('url'),
+                        description=node_data.get('description')
+                    )
+                    
+                    # Add node to graph
+                    graph.add_node(
+                        node_data['id'],
+                        type=valid_types[node_type_str],
+                        level=node_data.get('level', 0),
+                        metadata=metadata
+                    )
+                    print(f"Added node: {node_data['id']} (type: {node_type_str})")
+                    
+                except Exception as e:
+                    print(f"Error adding node {node_data.get('id', 'unknown')}: {str(e)}")
+                    continue
             
-            # Add edges with their attributes
-            for edge_data in graph_dict['edges']:
-                graph.add_edge(
-                    edge_data['source'],
-                    edge_data['target'],
-                    relationship=edge_data.get('relationship', 'related_to')
-                )
+            # Add edges if any nodes were added
+            if len(graph.nodes) > 0 and 'edges' in graph_dict:
+                for edge_data in graph_dict['edges']:
+                    try:
+                        source = edge_data.get('source')
+                        target = edge_data.get('target')
+                        
+                        if not source or not target:
+                            print(f"Invalid edge data: missing source or target - {edge_data}")
+                            continue
+                        
+                        if source not in graph.nodes or target not in graph.nodes:
+                            print(f"Invalid edge: source or target node not found - {edge_data}")
+                            continue
+                        
+                        relationship = edge_data.get('relationship', 'related_to')
+                        graph.add_edge(source, target, relationship=relationship)
+                        print(f"Added edge: {source} -> {target} ({relationship})")
+                        
+                    except Exception as e:
+                        print(f"Error adding edge: {str(e)}")
+                        continue
             
+            if len(graph.nodes) == 0:
+                print("No valid nodes were found in the JSON data")
+                return None
+            
+            print(f"Successfully imported graph with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
             return graph
             
+        except json.JSONDecodeError as e:
+            print(f"Invalid JSON format: {str(e)}")
+            return None
         except Exception as e:
             print(f"Error importing graph from JSON: {str(e)}")
             return None

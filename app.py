@@ -88,7 +88,171 @@ def main():
     # Sidebar
     with st.sidebar:
         # Add tabs for different operations
-        tab1, tab2, tab3, tab4 = st.tabs(["Add", "Edit", "Delete", "Controls"])
+        tab0, tab1, tab2, tab3, tab4 = st.tabs(["Import", "Add", "Edit", "Delete", "Controls"])
+        
+        with tab0:
+            st.header("Import Data")
+            st.markdown("""
+            Import an existing knowledge graph from:
+            - JSON file upload
+            - JSON text input
+            - Previously saved graph
+            """)
+            
+            # Initialize session state for import data
+            if 'import_json_str' not in st.session_state:
+                st.session_state.import_json_str = None
+            if 'import_method' not in st.session_state:
+                st.session_state.import_method = None
+            if 'parsed_graph' not in st.session_state:
+                st.session_state.parsed_graph = None
+            
+            # File uploader section
+            st.subheader("📤 Upload JSON File")
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                uploaded_file = st.file_uploader("Choose a JSON file", type=['json'])
+            with col2:
+                submit_file = st.button("Submit File", key="submit_file", type="primary", disabled=uploaded_file is None)
+            
+            if uploaded_file is not None and submit_file:
+                try:
+                    json_str = uploaded_file.getvalue().decode()
+                    st.session_state.import_json_str = json_str
+                    st.session_state.import_method = "file"
+                    st.success("File submitted successfully! Choose an import option below.")
+                except Exception as e:
+                    st.error(f"Error reading file: {str(e)}")
+            
+            # Text input section
+            st.subheader("📝 Paste JSON")
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                json_input = st.text_area("JSON Input", height=150)
+            with col2:
+                submit_text = st.button("Submit JSON", key="submit_text", type="primary", disabled=not json_input)
+            
+            if json_input and submit_text:
+                st.session_state.import_json_str = json_input
+                st.session_state.import_method = "text"
+                st.success("JSON text submitted successfully! Choose an import option below.")
+            
+            # Import options
+            if st.session_state.import_json_str:
+                st.markdown("---")
+                st.subheader("🔄 Import Options")
+                
+                try:
+                    # Only parse if we haven't already or if the method changed
+                    if not st.session_state.parsed_graph:
+                        new_graph = persistence.import_from_json(st.session_state.import_json_str)
+                        st.session_state.parsed_graph = new_graph
+                    else:
+                        new_graph = st.session_state.parsed_graph
+                    
+                    if new_graph and len(new_graph.nodes) > 0:
+                        st.info(f"Found {len(new_graph.nodes)} nodes and {len(new_graph.edges)} edges in the imported data.")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            if st.button("Replace Current Graph", key="replace", type="primary"):
+                                st.session_state.graph.graph = new_graph
+                                st.session_state.import_json_str = None
+                                st.session_state.import_method = None
+                                st.session_state.parsed_graph = None
+                                st.success("Graph imported successfully!")
+                                st.experimental_rerun()
+                        with col2:
+                            if st.button("Merge with Current Graph", key="merge", type="primary"):
+                                # Merge nodes and edges
+                                for node, data in new_graph.nodes(data=True):
+                                    if not st.session_state.graph.graph.has_node(node):
+                                        st.session_state.graph.graph.add_node(node, **data)
+                                for source, target, key, data in new_graph.edges(data=True, keys=True):
+                                    st.session_state.graph.graph.add_edge(source, target, key, **data)
+                                st.session_state.import_json_str = None
+                                st.session_state.import_method = None
+                                st.session_state.parsed_graph = None
+                                st.success("Graphs merged successfully!")
+                                st.experimental_rerun()
+                        with col3:
+                            if st.button("Cancel Import", key="cancel"):
+                                st.session_state.import_json_str = None
+                                st.session_state.import_method = None
+                                st.session_state.parsed_graph = None
+                                st.experimental_rerun()
+                    else:
+                        st.error("The imported data does not contain any valid nodes!")
+                        st.info("Please check the JSON Format Example below for the correct structure.")
+                        if st.button("Clear and Try Again", key="clear_error"):
+                            st.session_state.import_json_str = None
+                            st.session_state.import_method = None
+                            st.session_state.parsed_graph = None
+                            st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Error importing graph: {str(e)}")
+                    st.info("Please check the JSON Format Example below for the correct structure.")
+                    if st.button("Clear and Try Again", key="clear_exception"):
+                        st.session_state.import_json_str = None
+                        st.session_state.import_method = None
+                        st.session_state.parsed_graph = None
+                        st.experimental_rerun()
+            
+            # Load saved graph section
+            st.markdown("---")
+            st.subheader("💾 Load Saved Graph")
+            if st.button("Load from Disk"):
+                loaded_graph = persistence.load_graph()
+                if loaded_graph:
+                    st.session_state.graph.graph = loaded_graph
+                    st.success("Graph loaded successfully!")
+                    st.experimental_rerun()
+                else:
+                    st.error("Failed to load graph from disk!")
+            
+            # Show example JSON format
+            with st.expander("JSON Format Example", expanded=True):
+                st.code("""
+{
+    "nodes": [
+        {
+            "id": "main_topic_1",
+            "type": "main_topic",
+            "description": "This is the main topic",
+            "level": 0
+        },
+        {
+            "id": "sub_topic_1",
+            "type": "sub_topic",
+            "description": "This is a subtopic",
+            "level": 1
+        },
+        {
+            "id": "paper_1",
+            "type": "paper",
+            "description": "This is a research paper",
+            "url": "https://example.com/paper",
+            "level": 2
+        }
+    ],
+    "edges": [
+        {
+            "source": "main_topic_1",
+            "target": "sub_topic_1",
+            "relationship": "contains"
+        },
+        {
+            "source": "sub_topic_1",
+            "target": "paper_1",
+            "relationship": "references"
+        }
+    ]
+}
+""", language="json")
+                st.write("Valid node types:", ", ".join([
+                    "main_topic", "sub_topic", "paper", "concept", 
+                    "method", "tool", "dataset", "other"
+                ]))
         
         with tab1:
             st.header("Add New Content")
@@ -410,48 +574,6 @@ def main():
                         st.success("Graph saved successfully!")
                     else:
                         st.error("Failed to save graph!")
-                
-                st.markdown("""
-                ### Import Graph
-                Import a graph from JSON. You can either:
-                1. Upload a JSON file
-                2. Paste JSON text directly
-                
-                The current graph will be replaced with the imported one.
-                """)
-                
-                # File uploader for JSON
-                uploaded_file = st.file_uploader("Upload JSON file", type=['json'])
-                if uploaded_file is not None:
-                    try:
-                        json_str = uploaded_file.getvalue().decode()
-                        new_graph = persistence.import_from_json(json_str)
-                        if new_graph:
-                            st.session_state.graph.graph = new_graph
-                            st.success("Graph imported successfully!")
-                            st.experimental_rerun()
-                        else:
-                            st.error("Failed to import graph from file!")
-                    except Exception as e:
-                        st.error(f"Error importing graph: {str(e)}")
-                
-                # Text area for JSON input
-                st.markdown("**Or paste JSON directly:**")
-                json_input = st.text_area("JSON Input", height=150)
-                if st.button("Import from JSON"):
-                    if json_input:
-                        try:
-                            new_graph = persistence.import_from_json(json_input)
-                            if new_graph:
-                                st.session_state.graph.graph = new_graph
-                                st.success("Graph imported successfully!")
-                                st.experimental_rerun()
-                            else:
-                                st.error("Failed to import graph from text!")
-                        except Exception as e:
-                            st.error(f"Error importing graph: {str(e)}")
-                    else:
-                        st.warning("Please enter JSON text to import!")
     
     # Main content area - Graph Visualization
     col1, col2 = st.columns([2, 1])
