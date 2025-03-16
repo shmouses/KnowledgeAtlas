@@ -9,6 +9,7 @@ import tempfile
 from data_model import KnowledgeGraph, NodeType, NodeMetadata
 from visualization import generate_graph_visualization
 from persistence import GraphPersistence
+from llm_handler import LLMProvider, LLMConfig, LLMManager, format_json_response
 
 # Initialize session state
 if 'graph' not in st.session_state:
@@ -25,6 +26,12 @@ if 'selected_node_info' not in st.session_state:
     st.session_state.selected_node_info = None
 if 'edit_mode' not in st.session_state:
     st.session_state.edit_mode = False
+if 'llm_manager' not in st.session_state:
+    st.session_state.llm_manager = LLMManager()
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
+if 'api_keys' not in st.session_state:
+    st.session_state.api_keys = {}
 
 # Initialize persistence
 persistence = GraphPersistence()
@@ -72,7 +79,108 @@ def toggle_edge_type(edge_type: str):
     else:
         st.session_state.show_edge_types.add(edge_type)
 
+def initialize_session_state():
+    if 'graph' not in st.session_state:
+        st.session_state.graph = nx.MultiDiGraph()
+    if 'llm_manager' not in st.session_state:
+        st.session_state.llm_manager = LLMManager()
+    if 'conversation_history' not in st.session_state:
+        st.session_state.conversation_history = []
+    if 'api_keys' not in st.session_state:
+        st.session_state.api_keys = {}
+
+def render_llm_tab():
+    st.header("🤖 AI Knowledge Graph Assistant")
+    
+    # LLM Provider Configuration
+    with st.expander("Configure LLM Providers", expanded=True):
+        st.write("Configure your preferred LLM providers. Ollama is available for free local use.")
+        
+        # Ollama status
+        ollama_available = st.session_state.llm_manager.handlers[LLMProvider.OLLAMA].is_available()
+        st.write("Ollama Status:", "✅ Available" if ollama_available else "❌ Not Available")
+        if not ollama_available:
+            st.info("To use Ollama:\n1. Install Ollama from https://ollama.ai\n2. Run 'ollama run llama2'")
+        
+        # API Key Configuration
+        for provider in [LLMProvider.OPENAI, LLMProvider.ANTHROPIC, LLMProvider.HUGGINGFACE]:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                api_key = st.text_input(
+                    f"{provider.value.title()} API Key",
+                    type="password",
+                    value=st.session_state.api_keys.get(provider, ""),
+                    key=f"api_key_{provider.value}"
+                )
+            with col2:
+                if st.button("Save", key=f"save_{provider.value}"):
+                    if api_key:
+                        st.session_state.api_keys[provider] = api_key
+                        st.session_state.llm_manager.add_config(
+                            LLMConfig(provider, api_key)
+                        )
+                        st.success(f"✅ {provider.value.title()} API key saved!")
+                    else:
+                        if provider in st.session_state.api_keys:
+                            del st.session_state.api_keys[provider]
+                        st.warning(f"❌ {provider.value.title()} API key removed")
+    
+    # Conversation Interface
+    st.subheader("Knowledge Conversation")
+    st.write("Describe your knowledge domain and papers, and I'll help create a knowledge graph.")
+    
+    # Display conversation history
+    for i, (role, message) in enumerate(st.session_state.conversation_history):
+        with st.chat_message(role):
+            st.write(message)
+    
+    # User input
+    if prompt := st.chat_input("Describe your knowledge or ask questions..."):
+        st.session_state.conversation_history.append(("user", prompt))
+        with st.chat_message("user"):
+            st.write(prompt)
+        
+        # Get available providers
+        available_providers = st.session_state.llm_manager.get_available_providers()
+        
+        if not available_providers:
+            with st.chat_message("assistant"):
+                st.error("No LLM providers available. Please configure at least one provider.")
+            st.session_state.conversation_history.append(
+                ("assistant", "No LLM providers available. Please configure at least one provider.")
+            )
+        else:
+            # Use the first available provider
+            provider = available_providers[0]
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    response = st.session_state.llm_manager.generate_knowledge_graph_json(
+                        "\n".join(msg for _, msg in st.session_state.conversation_history),
+                        provider
+                    )
+                    
+                    # Try to extract and format JSON
+                    json_response = format_json_response(response)
+                    
+                    if json_response:
+                        st.write("I've created a knowledge graph based on our conversation. You can:")
+                        st.write("1. Continue the conversation to refine it")
+                        st.write("2. Use the JSON below in the Import tab")
+                        st.code(json_response, language="json")
+                    else:
+                        st.write(response)
+                        st.write("Continue describing your knowledge domain, and I'll try to create a graph when there's enough information.")
+                    
+                    st.session_state.conversation_history.append(("assistant", response))
+    
+    # Clear conversation button
+    if st.button("Clear Conversation"):
+        st.session_state.conversation_history = []
+        st.rerun()
+
 def main():
+    initialize_session_state()
     st.set_page_config(
         page_title="Knowledge Atlas",
         page_icon="📚",
@@ -85,495 +193,171 @@ def main():
     Add nodes and connect them to create your knowledge graph.
     """)
     
-    # Sidebar
-    with st.sidebar:
-        # Add tabs for different operations
-        tab0, tab1, tab2, tab3, tab4 = st.tabs(["Import", "Add", "Edit", "Delete", "Controls"])
+    tab0, tab1, tab2, tab3, tab4 = st.tabs(["🤖 AI Assistant", "📤 Import", "➕ Add", "🎮 Controls"])
+    
+    with tab0:
+        render_llm_tab()
+    
+    with tab1:
+        render_import_tab()
+    
+    with tab2:
+        render_add_tab()
+    
+    with tab3:
+        render_controls_tab()
+    
+    with tab4:
+        st.header("Visualization Controls")
         
-        with tab0:
-            st.header("Import Data")
+        # Level visibility toggles with "Select All" option
+        with st.expander("📊 Show/Hide Levels", expanded=True):
+            # Add "Select All" checkbox
+            all_levels = set(range(11))  # 0 to 10
+            if st.checkbox("Select All Levels", value=st.session_state.show_levels == all_levels):
+                st.session_state.show_levels = all_levels.copy()
+            else:
+                # Individual level toggles in columns
+                cols = st.columns(3)
+                for i, level in enumerate(range(11)):
+                    with cols[i % 3]:
+                        if st.checkbox(f"Level {level}", value=level in st.session_state.show_levels):
+                            st.session_state.show_levels.add(level)
+                        elif level in st.session_state.show_levels:
+                            st.session_state.show_levels.remove(level)
+        
+        # Edge type visibility toggles
+        with st.expander("🔗 Edge Visibility", expanded=True):
             st.markdown("""
-            Import an existing knowledge graph from:
-            - JSON file upload
-            - JSON text input
-            - Previously saved graph
+            **Control which types of edges are visible in the graph.**
+            This is independent of edge selection below.
             """)
             
-            # Initialize session state for import data
-            if 'import_json_str' not in st.session_state:
-                st.session_state.import_json_str = None
-            if 'import_method' not in st.session_state:
-                st.session_state.import_method = None
-            if 'parsed_graph' not in st.session_state:
-                st.session_state.parsed_graph = None
+            # Get all unique edge types from the graph
+            edge_types = set()
+            for _, _, data in st.session_state.graph.graph.edges(data=True):
+                edge_types.add(data.get('relationship', 'related_to'))
             
-            # File uploader section
-            st.subheader("📤 Upload JSON File")
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                uploaded_file = st.file_uploader("Choose a JSON file", type=['json'])
-            with col2:
-                submit_file = st.button("Submit File", key="submit_file", type="primary", disabled=uploaded_file is None)
+            # Add default edge types if not in graph
+            edge_types.update(['belongs_to', 'related_to', 'depends_on'])
+            edge_types = sorted(list(edge_types))
             
-            if uploaded_file is not None and submit_file:
-                try:
-                    json_str = uploaded_file.getvalue().decode()
-                    st.session_state.import_json_str = json_str
-                    st.session_state.import_method = "file"
-                    st.success("File submitted successfully! Choose an import option below.")
-                except Exception as e:
-                    st.error(f"Error reading file: {str(e)}")
-            
-            # Text input section
-            st.subheader("📝 Paste JSON")
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                json_input = st.text_area("JSON Input", height=150)
-            with col2:
-                submit_text = st.button("Submit JSON", key="submit_text", type="primary", disabled=not json_input)
-            
-            if json_input and submit_text:
-                st.session_state.import_json_str = json_input
-                st.session_state.import_method = "text"
-                st.success("JSON text submitted successfully! Choose an import option below.")
-            
-            # Import options
-            if st.session_state.import_json_str:
-                st.markdown("---")
-                st.subheader("🔄 Import Options")
-                
-                try:
-                    # Only parse if we haven't already or if the method changed
-                    if not st.session_state.parsed_graph:
-                        new_graph = persistence.import_from_json(st.session_state.import_json_str)
-                        st.session_state.parsed_graph = new_graph
-                    else:
-                        new_graph = st.session_state.parsed_graph
-                    
-                    if new_graph and len(new_graph.nodes) > 0:
-                        st.info(f"Found {len(new_graph.nodes)} nodes and {len(new_graph.edges)} edges in the imported data.")
-                        
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            if st.button("Replace Current Graph", key="replace", type="primary"):
-                                st.session_state.graph.graph = new_graph
-                                st.session_state.import_json_str = None
-                                st.session_state.import_method = None
-                                st.session_state.parsed_graph = None
-                                st.success("Graph imported successfully!")
-                                st.experimental_rerun()
-                        with col2:
-                            if st.button("Merge with Current Graph", key="merge", type="primary"):
-                                # Merge nodes and edges
-                                for node, data in new_graph.nodes(data=True):
-                                    if not st.session_state.graph.graph.has_node(node):
-                                        st.session_state.graph.graph.add_node(node, **data)
-                                for source, target, key, data in new_graph.edges(data=True, keys=True):
-                                    st.session_state.graph.graph.add_edge(source, target, key, **data)
-                                st.session_state.import_json_str = None
-                                st.session_state.import_method = None
-                                st.session_state.parsed_graph = None
-                                st.success("Graphs merged successfully!")
-                                st.experimental_rerun()
-                        with col3:
-                            if st.button("Cancel Import", key="cancel"):
-                                st.session_state.import_json_str = None
-                                st.session_state.import_method = None
-                                st.session_state.parsed_graph = None
-                                st.experimental_rerun()
-                    else:
-                        st.error("The imported data does not contain any valid nodes!")
-                        st.info("Please check the JSON Format Example below for the correct structure.")
-                        if st.button("Clear and Try Again", key="clear_error"):
-                            st.session_state.import_json_str = None
-                            st.session_state.import_method = None
-                            st.session_state.parsed_graph = None
-                            st.experimental_rerun()
-                except Exception as e:
-                    st.error(f"Error importing graph: {str(e)}")
-                    st.info("Please check the JSON Format Example below for the correct structure.")
-                    if st.button("Clear and Try Again", key="clear_exception"):
-                        st.session_state.import_json_str = None
-                        st.session_state.import_method = None
-                        st.session_state.parsed_graph = None
-                        st.experimental_rerun()
-            
-            # Load saved graph section
-            st.markdown("---")
-            st.subheader("💾 Load Saved Graph")
-            if st.button("Load from Disk"):
-                loaded_graph = persistence.load_graph()
-                if loaded_graph:
-                    st.session_state.graph.graph = loaded_graph
-                    st.success("Graph loaded successfully!")
-                    st.experimental_rerun()
-                else:
-                    st.error("Failed to load graph from disk!")
-            
-            # Show example JSON format
-            with st.expander("JSON Format Example", expanded=True):
-                st.code("""
-{
-    "nodes": [
-        {
-            "id": "main_topic_1",
-            "type": "main_topic",
-            "description": "This is the main topic",
-            "level": 0
-        },
-        {
-            "id": "sub_topic_1",
-            "type": "sub_topic",
-            "description": "This is a subtopic",
-            "level": 1
-        },
-        {
-            "id": "paper_1",
-            "type": "paper",
-            "description": "This is a research paper",
-            "url": "https://example.com/paper",
-            "level": 2
-        }
-    ],
-    "edges": [
-        {
-            "source": "main_topic_1",
-            "target": "sub_topic_1",
-            "relationship": "contains"
-        },
-        {
-            "source": "sub_topic_1",
-            "target": "paper_1",
-            "relationship": "references"
-        }
-    ]
-}
-""", language="json")
-                st.write("Valid node types:", ", ".join([
-                    "main_topic", "sub_topic", "paper", "concept", 
-                    "method", "tool", "dataset", "other"
-                ]))
-        
-        with tab1:
-            st.header("Add New Content")
-            
-            # Add Node Section
-            st.subheader("Add Node")
-            with st.form("add_node_form"):
-                node_name = st.text_input("Node Name")
-                node_type = st.selectbox("Node Type", [t.value for t in NodeType])
-                node_level = st.number_input("Level", min_value=0, max_value=10, value=0)
-                node_url = st.text_input("URL (optional)")
-                node_description = st.text_area("Description (optional)")
-                
-                if st.form_submit_button("Add Node"):
-                    if node_name:
-                        metadata = NodeMetadata(url=node_url if node_url else None,
-                                              description=node_description if node_description else None)
-                        if st.session_state.graph.add_node(node_name, NodeType(node_type), node_level, metadata):
-                            st.success(f"Added {node_name}")
-                        else:
-                            st.error(f"Node {node_name} already exists")
-            
-            # Add Edge Section
-            st.subheader("Add Connection")
-            with st.form("add_edge_form"):
-                nodes = list(st.session_state.graph.graph.nodes())
-                if len(nodes) >= 2:
-                    source = st.selectbox("Source Node", nodes, key="add_edge_source")
-                    target = st.selectbox("Target Node", [n for n in nodes if n != source], key="add_edge_target")
-                    relationship = st.text_input("Relationship Type", "related_to")
-                    
-                    if st.form_submit_button("Add Connection"):
-                        if source and target and relationship:
-                            if st.session_state.graph.add_edge(source, target, relationship):
-                                st.success(f"Connected {source} to {target}")
-                            else:
-                                st.error("Failed to add connection")
-                else:
-                    st.warning("Please add at least two nodes first!")
-                    st.form_submit_button("Add Connection", disabled=True)
-        
-        with tab2:
-            st.header("Edit Content")
-            
-            # Edit Node Section
-            st.subheader("Edit Node")
-            nodes = list(st.session_state.graph.graph.nodes())
-            if nodes:
-                selected_node = st.selectbox("Select Node to Edit", nodes, key="edit_node_select")
-                if selected_node:
-                    node_data = st.session_state.graph.graph.nodes[selected_node]
-                    with st.form("edit_node_form"):
-                        new_name = st.text_input("Node Name", value=selected_node)
-                        new_type = st.selectbox("Node Type", 
-                                              [t.value for t in NodeType], 
-                                              index=[t.value for t in NodeType].index(node_data['type'].value))
-                        new_level = st.number_input("Level", 
-                                                  min_value=0, 
-                                                  max_value=10, 
-                                                  value=node_data.get('level', 0))
-                        new_url = st.text_input("URL", 
-                                              value=node_data.get('metadata', NodeMetadata()).url or "")
-                        new_description = st.text_area("Description", 
-                                                     value=node_data.get('metadata', NodeMetadata()).description or "")
-                        
-                        if st.form_submit_button("Update Node"):
-                            try:
-                                # Store old edges
-                                old_edges = list(st.session_state.graph.graph.edges(selected_node, data=True))
-                                
-                                # Remove old node
-                                if new_name != selected_node:
-                                    st.session_state.graph.graph.remove_node(selected_node)
-                                
-                                # Add updated node
-                                metadata = NodeMetadata(url=new_url if new_url else None,
-                                                      description=new_description if new_description else None)
-                                
-                                # Update node attributes if name hasn't changed
-                                if new_name == selected_node:
-                                    st.session_state.graph.graph.nodes[selected_node]['type'] = NodeType(new_type)
-                                    st.session_state.graph.graph.nodes[selected_node]['level'] = new_level
-                                    st.session_state.graph.graph.nodes[selected_node]['metadata'] = metadata
-                                    st.success(f"Updated node {selected_node}")
-                                else:
-                                    # Add as new node if name changed
-                                    if st.session_state.graph.add_node(new_name, NodeType(new_type), new_level, metadata):
-                                        # Restore edges with the new node name
-                                        for source, target, data in old_edges:
-                                            new_source = new_name if source == selected_node else source
-                                            new_target = new_name if target == selected_node else target
-                                            st.session_state.graph.add_edge(new_source, new_target, data.get('relationship', 'related_to'))
-                                        st.success(f"Updated node {selected_node} to {new_name}")
-                                    else:
-                                        # If failed to add new node, restore the old one
-                                        st.session_state.graph.add_node(selected_node, node_data['type'], node_data.get('level', 0), node_data.get('metadata', NodeMetadata()))
-                                        for source, target, data in old_edges:
-                                            st.session_state.graph.add_edge(source, target, data.get('relationship', 'related_to'))
-                                        st.error(f"Failed to update node: {new_name} already exists")
-                            except Exception as e:
-                                st.error(f"Error updating node: {str(e)}")
+            # Add "Show All" checkbox
+            if st.checkbox("Show All Edge Types", value=st.session_state.show_edge_types == set(edge_types)):
+                st.session_state.show_edge_types = set(edge_types)
             else:
-                st.warning("No nodes to edit!")
-            
-            # Edit Edge Section
-            st.subheader("Edit Edge")
-            edges = list(st.session_state.graph.graph.edges(data=True))
-            if edges:
-                edge_labels = [f"{s} → {t} ({d.get('relationship', 'related_to')})" for s, t, d in edges]
-                selected_edge_idx = st.selectbox("Select Edge to Edit", 
-                                               range(len(edges)), 
-                                               format_func=lambda x: edge_labels[x],
-                                               key="edit_edge_select")
-                
-                if selected_edge_idx is not None:
-                    source, target, data = edges[selected_edge_idx]
-                    with st.form("edit_edge_form"):
-                        new_source = st.selectbox("Source Node", nodes, 
-                                                index=nodes.index(source),
-                                                key="edit_edge_source")
-                        new_target = st.selectbox("Target Node", 
-                                                [n for n in nodes if n != new_source],
-                                                index=[n for n in nodes if n != new_source].index(target),
-                                                key="edit_edge_target")
-                        new_relationship = st.text_input("Relationship Type", 
-                                                       value=data.get('relationship', 'related_to'))
-                        
-                        if st.form_submit_button("Update Edge"):
-                            # Remove old edge
-                            st.session_state.graph.graph.remove_edge(source, target)
-                            
-                            # Add updated edge
-                            if st.session_state.graph.add_edge(new_source, new_target, new_relationship):
-                                st.success(f"Updated edge {source} → {target}")
-                            else:
-                                st.error("Failed to update edge")
-            else:
-                st.warning("No edges to edit!")
-        
-        with tab3:
-            st.header("Delete Content")
-            
-            # Delete Node Section
-            st.subheader("Delete Node")
-            nodes = list(st.session_state.graph.graph.nodes())
-            if nodes:
-                node_to_delete = st.selectbox("Select Node to Delete", nodes, key="delete_node_select")
-                if st.button("Delete Node"):
-                    st.session_state.graph.graph.remove_node(node_to_delete)
-                    st.success(f"Deleted node {node_to_delete}")
-            else:
-                st.warning("No nodes to delete!")
-            
-            # Delete Edge Section
-            st.subheader("Delete Edge")
-            edges = list(st.session_state.graph.graph.edges(data=True))
-            if edges:
-                edge_labels = [f"{s} → {t} ({d.get('relationship', 'related_to')})" for s, t, d in edges]
-                edge_to_delete = st.selectbox("Select Edge to Delete", 
-                                            range(len(edges)), 
-                                            format_func=lambda x: edge_labels[x],
-                                            key="delete_edge_select")
-                
-                if st.button("Delete Edge"):
-                    source, target, _ = edges[edge_to_delete]
-                    st.session_state.graph.graph.remove_edge(source, target)
-                    st.success(f"Deleted edge {source} → {target}")
-            else:
-                st.warning("No edges to delete!")
-        
-        with tab4:
-            st.header("Visualization Controls")
-            
-            # Level visibility toggles with "Select All" option
-            with st.expander("📊 Show/Hide Levels", expanded=True):
-                # Add "Select All" checkbox
-                all_levels = set(range(11))  # 0 to 10
-                if st.checkbox("Select All Levels", value=st.session_state.show_levels == all_levels):
-                    st.session_state.show_levels = all_levels.copy()
-                else:
-                    # Individual level toggles in columns
-                    cols = st.columns(3)
-                    for i, level in enumerate(range(11)):
-                        with cols[i % 3]:
-                            if st.checkbox(f"Level {level}", value=level in st.session_state.show_levels):
-                                st.session_state.show_levels.add(level)
-                            elif level in st.session_state.show_levels:
-                                st.session_state.show_levels.remove(level)
-            
-            # Edge type visibility toggles
-            with st.expander("🔗 Edge Visibility", expanded=True):
-                st.markdown("""
-                **Control which types of edges are visible in the graph.**
-                This is independent of edge selection below.
-                """)
-                
-                # Get all unique edge types from the graph
-                edge_types = set()
-                for _, _, data in st.session_state.graph.graph.edges(data=True):
-                    edge_types.add(data.get('relationship', 'related_to'))
-                
-                # Add default edge types if not in graph
-                edge_types.update(['belongs_to', 'related_to', 'depends_on'])
-                edge_types = sorted(list(edge_types))
-                
-                # Add "Show All" checkbox
-                if st.checkbox("Show All Edge Types", value=st.session_state.show_edge_types == set(edge_types)):
-                    st.session_state.show_edge_types = set(edge_types)
-                else:
-                    # Individual edge type toggles in columns
-                    edge_cols = st.columns(2)
-                    for i, edge_type in enumerate(edge_types):
-                        with edge_cols[i % 2]:
-                            current_value = edge_type in st.session_state.show_edge_types
-                            if st.checkbox(
-                                f"{edge_type}",
-                                value=current_value,
-                                key=f"edge_type_{edge_type}",
-                                help=f"Show/hide all edges of type '{edge_type}'"
-                            ):
-                                if not current_value:  # If it was off and now should be on
-                                    st.session_state.show_edge_types.add(edge_type)
-                            elif current_value:  # If it was on and now should be off
-                                st.session_state.show_edge_types.remove(edge_type)
-            
-            # Node and Edge Selection
-            with st.expander("🔍 Select Elements", expanded=True):
-                st.markdown("""
-                **Highlight specific nodes and edges.**
-                Selected items will be highlighted in gold/orange. This does not affect visibility.
-                """)
-                
-                # Add "Clear All" button
-                if st.button("Clear All Selections"):
-                    st.session_state.selected_nodes.clear()
-                    st.session_state.selected_edges.clear()
-                
-                # Node selection with search
-                st.subheader("Select Nodes")
-                nodes = list(st.session_state.graph.graph.nodes())
-                if nodes:
-                    # Add search box for nodes
-                    search_term = st.text_input("Search Nodes", key="node_search").lower()
-                    filtered_nodes = [node for node in nodes if search_term in node.lower()]
-                    
-                    # Create columns for node checkboxes
-                    node_cols = st.columns(2)
-                    for i, node in enumerate(filtered_nodes):
-                        with node_cols[i % 2]:
-                            if st.checkbox(node, value=node in st.session_state.selected_nodes, key=f"node_{node}"):
-                                toggle_node_selection(node)
-                else:
-                    st.info("No nodes available to select.")
-                
-                # Edge selection with search
-                st.subheader("Select Edges")
-                edges = list(st.session_state.graph.graph.edges(data=True))
-                if edges:
-                    # Add search box for edges
-                    search_term = st.text_input("Search Edges", key="edge_search").lower()
-                    filtered_edges = []
-                    for source, target, data in edges:
-                        edge_label = f"{source} → {target} ({data.get('relationship', 'related_to')})"
-                        if search_term in edge_label.lower():
-                            filtered_edges.append((source, target, data))
-                    
-                    # Create columns for edge checkboxes
-                    edge_cols = st.columns(1)
-                    for source, target, data in filtered_edges:
-                        edge_label = f"{source} → {target} ({data.get('relationship', 'related_to')})"
+                # Individual edge type toggles in columns
+                edge_cols = st.columns(2)
+                for i, edge_type in enumerate(edge_types):
+                    with edge_cols[i % 2]:
+                        current_value = edge_type in st.session_state.show_edge_types
                         if st.checkbox(
-                            edge_label,
-                            value=(source, target) in st.session_state.selected_edges,
-                            key=f"edge_{source}_{target}",
-                            help="Highlight this edge in the graph"
+                            f"{edge_type}",
+                            value=current_value,
+                            key=f"edge_type_{edge_type}",
+                            help=f"Show/hide all edges of type '{edge_type}'"
                         ):
-                            toggle_edge_selection(source, target)
+                            if not current_value:  # If it was off and now should be on
+                                st.session_state.show_edge_types.add(edge_type)
+                        elif current_value:  # If it was on and now should be off
+                            st.session_state.show_edge_types.remove(edge_type)
+        
+        # Node and Edge Selection
+        with st.expander("🔍 Select Elements", expanded=True):
+            st.markdown("""
+            **Highlight specific nodes and edges.**
+            Selected items will be highlighted in gold/orange. This does not affect visibility.
+            """)
+            
+            # Add "Clear All" button
+            if st.button("Clear All Selections"):
+                st.session_state.selected_nodes.clear()
+                st.session_state.selected_edges.clear()
+            
+            # Node selection with search
+            st.subheader("Select Nodes")
+            nodes = list(st.session_state.graph.graph.nodes())
+            if nodes:
+                # Add search box for nodes
+                search_term = st.text_input("Search Nodes", key="node_search").lower()
+                filtered_nodes = [node for node in nodes if search_term in node.lower()]
+                
+                # Create columns for node checkboxes
+                node_cols = st.columns(2)
+                for i, node in enumerate(filtered_nodes):
+                    with node_cols[i % 2]:
+                        if st.checkbox(node, value=node in st.session_state.selected_nodes, key=f"node_{node}"):
+                            toggle_node_selection(node)
+            else:
+                st.info("No nodes available to select.")
+            
+            # Edge selection with search
+            st.subheader("Select Edges")
+            edges = list(st.session_state.graph.graph.edges(data=True))
+            if edges:
+                # Add search box for edges
+                search_term = st.text_input("Search Edges", key="edge_search").lower()
+                filtered_edges = []
+                for source, target, data in edges:
+                    edge_label = f"{source} → {target} ({data.get('relationship', 'related_to')})"
+                    if search_term in edge_label.lower():
+                        filtered_edges.append((source, target, data))
+                
+                # Create columns for edge checkboxes
+                edge_cols = st.columns(1)
+                for source, target, data in filtered_edges:
+                    edge_label = f"{source} → {target} ({data.get('relationship', 'related_to')})"
+                    if st.checkbox(
+                        edge_label,
+                        value=(source, target) in st.session_state.selected_edges,
+                        key=f"edge_{source}_{target}",
+                        help="Highlight this edge in the graph"
+                    ):
+                        toggle_edge_selection(source, target)
+            else:
+                st.info("No edges available to select.")
+        
+        # Node Information
+        if st.session_state.selected_node_info:
+            with st.expander("ℹ️ Node Information", expanded=True):
+                info = st.session_state.selected_node_info
+                st.write(f"**Name:** {info['name']}")
+                st.write(f"**Type:** {info['type'].value}")
+                st.write(f"**Level:** {info['level']}")
+                if info['metadata'].url:
+                    st.write(f"**URL:** [{info['metadata'].url}]({info['metadata'].url})")
+                if info['metadata'].description:
+                    st.write(f"**Description:** {info['metadata'].description}")
+                st.write("**Connected Nodes:**")
+                for connected in info['connected_nodes']:
+                    st.write(f"- {connected}")
+        
+        # Save/Load Section
+        with st.expander("💾 Save/Load", expanded=False):
+            st.markdown("""
+            ### Export Graph
+            Download your current graph as JSON or save it to disk.
+            """)
+            
+            # Export current graph
+            if st.button("Export as JSON"):
+                json_str = persistence.export_to_json(st.session_state.graph.graph)
+                if json_str:
+                    st.download_button(
+                        "Download JSON",
+                        json_str,
+                        "knowledge_graph.json",
+                        "application/json",
+                        key='download_json'
+                    )
                 else:
-                    st.info("No edges available to select.")
+                    st.error("Failed to export graph!")
             
-            # Node Information
-            if st.session_state.selected_node_info:
-                with st.expander("ℹ️ Node Information", expanded=True):
-                    info = st.session_state.selected_node_info
-                    st.write(f"**Name:** {info['name']}")
-                    st.write(f"**Type:** {info['type'].value}")
-                    st.write(f"**Level:** {info['level']}")
-                    if info['metadata'].url:
-                        st.write(f"**URL:** [{info['metadata'].url}]({info['metadata'].url})")
-                    if info['metadata'].description:
-                        st.write(f"**Description:** {info['metadata'].description}")
-                    st.write("**Connected Nodes:**")
-                    for connected in info['connected_nodes']:
-                        st.write(f"- {connected}")
-            
-            # Save/Load Section
-            with st.expander("💾 Save/Load", expanded=False):
-                st.markdown("""
-                ### Export Graph
-                Download your current graph as JSON or save it to disk.
-                """)
-                
-                # Export current graph
-                if st.button("Export as JSON"):
-                    json_str = persistence.export_to_json(st.session_state.graph.graph)
-                    if json_str:
-                        st.download_button(
-                            "Download JSON",
-                            json_str,
-                            "knowledge_graph.json",
-                            "application/json",
-                            key='download_json'
-                        )
-                    else:
-                        st.error("Failed to export graph!")
-                
-                if st.button("Save to Disk"):
-                    if persistence.save_graph(st.session_state.graph.graph):
-                        st.success("Graph saved successfully!")
-                    else:
-                        st.error("Failed to save graph!")
+            if st.button("Save to Disk"):
+                if persistence.save_graph(st.session_state.graph.graph):
+                    st.success("Graph saved successfully!")
+                else:
+                    st.error("Failed to save graph!")
     
     # Main content area - Graph Visualization
     col1, col2 = st.columns([2, 1])
